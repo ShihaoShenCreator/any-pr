@@ -85,6 +85,7 @@ internal static class Program
         var startDirectory = Path.GetFullPath(requestedPath ?? Environment.CurrentDirectory);
         var root = GetRepositoryRoot(startDirectory);
         var totals = new Dictionary<string, long>(StringComparer.Ordinal);
+        var byteTotals = new Dictionary<string, long>(StringComparer.Ordinal);
         var skippedBinaryFiles = 0;
         var paths = RunGit(root, "ls-files", "-z").Split('\0', StringSplitOptions.RemoveEmptyEntries);
 
@@ -96,20 +97,26 @@ internal static class Program
             }
 
             var fullPath = Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
-            var lines = CountTextLines(fullPath);
-            if (lines is null)
+            var metrics = CountSourceFile(fullPath);
+            if (metrics is null)
             {
                 skippedBinaryFiles++;
                 continue;
             }
 
-            totals[language] = totals.GetValueOrDefault(language) + lines.Value;
+            totals[language] = totals.GetValueOrDefault(language) + metrics.Value.Lines;
+            byteTotals[language] = byteTotals.GetValueOrDefault(language) + metrics.Value.Bytes;
         }
 
+        var totalBytes = byteTotals.Values.Sum();
         var ranking = totals
             .OrderByDescending(entry => entry.Value)
             .ThenBy(entry => entry.Key, StringComparer.Ordinal)
-            .Select(entry => new LanguageTotal(entry.Key, entry.Value))
+            .Select(entry => new LanguageTotal(
+                entry.Key,
+                entry.Value,
+                byteTotals.GetValueOrDefault(entry.Key),
+                totalBytes == 0 ? 0 : byteTotals.GetValueOrDefault(entry.Key) * 100d / totalBytes))
             .ToArray();
         var csharpLines = totals.GetValueOrDefault("C#");
         var leadingNonCsharpLines = totals
@@ -125,6 +132,7 @@ internal static class Program
             {
                 repository = root,
                 trackedSourceLines = ranking,
+                totalSourceBytes = totalBytes,
                 csharpLines,
                 linesToPassFirstPlace,
                 skippedBinaryFiles
@@ -136,9 +144,11 @@ internal static class Program
         Console.WriteLine("Tracked source lines (current working tree):");
         foreach (var entry in ranking)
         {
-            Console.WriteLine($"  {entry.Language,-14} {entry.Lines,12:N0}");
+            Console.WriteLine(
+                $"  {entry.Language,-14} {entry.Lines,12:N0} lines  {entry.Bytes,14:N0} bytes  {entry.ByteShare,6:F2}%");
         }
 
+        Console.WriteLine("Byte shares use recognized tracked source files; they are not GitHub Linguist results.");
         Console.WriteLine(linesToPassFirstPlace == 0
             ? "C# is already strictly ahead of every other counted language."
             : $"C# needs {linesToPassFirstPlace:N0} more lines to rank first.");
@@ -186,7 +196,7 @@ internal static class Program
         return output;
     }
 
-    private static long? CountTextLines(string path)
+    private static SourceMetrics? CountSourceFile(string path)
     {
         using var stream = File.OpenRead(path);
         var buffer = new byte[64 * 1024];
@@ -230,7 +240,9 @@ internal static class Program
             }
         }
 
-        return hasContent && lastByte is not '\r' and not '\n' ? lines + 1 : lines;
+        return new SourceMetrics(
+            hasContent && lastByte != (byte)'\r' && lastByte != (byte)'\n' ? lines + 1 : lines,
+            stream.Length);
     }
 
     private static void PrintHelp()
@@ -243,5 +255,7 @@ internal static class Program
             "  -h, --help          Show this help");
     }
 
-    private sealed record LanguageTotal(string Language, long Lines);
+    private readonly record struct SourceMetrics(long Lines, long Bytes);
+
+    private sealed record LanguageTotal(string Language, long Lines, long Bytes, double ByteShare);
 }
